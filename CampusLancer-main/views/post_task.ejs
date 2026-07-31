@@ -1,0 +1,173 @@
+<%- include('partials/header', { user: user, title: 'Post a Task' }) %>
+<style>
+  .post-wrap { max-width: 640px; margin: 0 auto; padding: 2.5rem 2rem; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+</style>
+
+<div class="post-wrap">
+  <a href="/business/dashboard" style="font-size:0.85rem;color:var(--gray-600);display:inline-flex;align-items:center;gap:0.3rem;margin-bottom:1.5rem">← Back to dashboard</a>
+
+  <div class="card fade-up">
+    <div class="section-title" style="margin-bottom:1.5rem"><span class="dot"></span> Post a New Task</div>
+
+    <% if (error) { %>
+      <div class="alert alert-error">⚠ <%= error %></div>
+    <% } %>
+
+    <form method="POST" action="/business/post-task">
+      <div class="form-group">
+        <label class="form-label">Task title</label>
+        <input type="text" name="title" class="form-input" placeholder="e.g. Build a REST API for mobile app" required/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Description</label>
+        <textarea name="description" class="form-textarea" style="min-height:140px"
+          placeholder="Describe what needs to be done, the deliverables, and any specific requirements..." required></textarea>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Required skill(s)</label>
+          <div style="display:flex;gap:0.5rem;align-items:center;">
+            <select id="skillSelect" class="form-select">
+              <option value="">-select skill --</option>
+              <option value="javascript">JavaScript — GitHub language: JavaScript (aliases: node, node.js, js)</option>
+              <option value="typescript">TypeScript — GitHub language: TypeScript (alias: ts)</option>
+              <option value="python">Python — GitHub language: Python</option>
+              <option value="java">Java — GitHub language: Java</option>
+              <option value="c++">C++ — GitHub language: C++ (alias: cpp)</option>
+              <option value="c#">C# — GitHub language: C# (alias: csharp)</option>
+              <option value="html">HTML — GitHub language: HTML</option>
+              <option value="css">CSS — GitHub language: CSS</option>
+              <option value="ruby">Ruby — GitHub language: Ruby</option>
+              <option value="php">PHP — GitHub language: PHP</option>
+              <option value="go">Go — GitHub language: Go</option>
+              <option value="rust">Rust — GitHub language: Rust</option>
+              <option value="kotlin">Kotlin — GitHub language: Kotlin</option>
+              <option value="swift">Swift — GitHub language: Swift</option>
+              <option value="scala">Scala — GitHub language: Scala</option>
+              <option value="dart">Dart — GitHub language: Dart</option>
+              <option value="sql">SQL — GitHub language: SQL</option>
+              <option value="bash">Bash — GitHub language: Shell/Bash</option>
+              <option value="powershell">PowerShell — GitHub language: PowerShell</option>
+              <option value="objective-c">Objective-C — GitHub language: Objective-C (alias: objectivec)</option>
+              <option value="perl">Perl — GitHub language: Perl</option>
+              <option value="lua">Lua — GitHub language: Lua</option>
+              <option value="matlab">MATLAB — GitHub language: MATLAB</option>
+              <option value="r">R — GitHub language: R</option>
+              <option value="groovy">Groovy — GitHub language: Groovy</option>
+              <option value="elixir">Elixir — GitHub language: Elixir</option>
+              <option value="haskell">Haskell — GitHub language: Haskell</option>
+              <option value="clojure">Clojure — GitHub language: Clojure</option>
+              <option value="julia">Julia — GitHub language: Julia</option>
+            </select>
+            <button type="button" id="addSkillBtn" class="btn btn-ghost">Add</button>
+          </div>
+          <input type="hidden" name="required_skill" id="requiredSkillInput" required/>
+          <div id="selectedSkills" style="margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:.5rem"></div>
+          <span class="form-hint">Select one or more languages. Click "Add" to include them; selected items are removed from the list to avoid duplicates.</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Min AI skill score</label>
+          <input type="number" name="min_skill_score" class="form-input" placeholder="0" min="0" max="100" value="0"/>
+          <span class="form-hint">0 = open to all skill levels</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Max accepted applicants <span style="color:var(--gray-400);font-weight:400">(optional)</span></label>
+        <input type="number" name="max_applicants" class="form-input" placeholder="e.g. 3" min="1" />
+        <span class="form-hint">If set, the task closes automatically after this many accepted students.</span>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Work type</label>
+          <select name="task_type" class="form-select" required>
+            <option value="remote">Remote</option>
+            <option value="on-site">On-site</option>
+            <option value="hybrid">Hybrid</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Deadline <span style="color:var(--gray-400);font-weight:400">(optional)</span></label>
+          <input type="date" name="deadline" class="form-input"/>
+        </div>
+      </div>
+      <div style="display:flex;gap:1rem;justify-content:flex-end;margin-top:0.5rem">
+        <a href="/business/dashboard" class="btn btn-ghost">Cancel</a>
+        <button type="submit" class="btn btn-primary">Post Task</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<%- include('partials/footer') %>
+
+<script>
+(function(){
+  const select = document.getElementById('skillSelect');
+  const addBtn = document.getElementById('addSkillBtn');
+  const selectedContainer = document.getElementById('selectedSkills');
+  const hiddenInput = document.getElementById('requiredSkillInput');
+
+  function updateHidden(){
+    const values = Array.from(selectedContainer.querySelectorAll('.skill-tag')).map(el=>el.dataset.value);
+    hiddenInput.value = values.join(',');
+  }
+
+  addBtn.addEventListener('click', ()=>{
+    const val = select.value;
+    if(!val) return;
+    const text = select.options[select.selectedIndex].text;
+    const tag = document.createElement('span');
+    tag.className = 'skill-tag';
+    tag.dataset.value = val;
+    tag.style.cssText = 'background:#eef;padding:0.25rem .5rem;border-radius:4px;display:inline-flex;align-items:center;gap:.5rem;';
+    const label = document.createElement('span'); label.textContent = text;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'remove-skill';
+    btn.style.cssText = 'background:none;border:none;color:#c00;cursor:pointer;font-weight:600;';
+    btn.textContent = '×';
+    tag.appendChild(label);
+    tag.appendChild(btn);
+    selectedContainer.appendChild(tag);
+    // remove option from select
+    select.remove(select.selectedIndex);
+    select.value = '';
+    updateHidden();
+  });
+
+  selectedContainer.addEventListener('click', (e)=>{
+    if(e.target.classList.contains('remove-skill')){
+      const tag = e.target.closest('.skill-tag');
+      const val = tag.dataset.value;
+      const text = tag.firstElementChild.textContent;
+      tag.remove();
+      const opt = document.createElement('option'); opt.value = val; opt.text = text;
+      select.appendChild(opt);
+      updateHidden();
+    }
+  });
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    const existing = hiddenInput.value;
+    if(existing){
+      const items = existing.split(',').map(s=>s.trim()).filter(Boolean);
+      items.forEach(v=>{
+        const opt = Array.from(select.options).find(o=>o.value===v);
+        if(opt){
+          select.value = v;
+          addBtn.click();
+        } else {
+          const tag = document.createElement('span');
+          tag.className='skill-tag';
+          tag.dataset.value = v;
+          tag.style.cssText='background:#eef;padding:0.25rem .5rem;border-radius:4px;display:inline-flex;align-items:center;gap:.5rem;';
+          tag.innerHTML = `<span>${v}</span><button type="button" class="remove-skill" style="background:none;border:none;color:#c00;cursor:pointer;font-weight:600;">×</button>`;
+          selectedContainer.appendChild(tag);
+        }
+      });
+      updateHidden();
+    }
+  });
+})();
+</script>

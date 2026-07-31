@@ -1,0 +1,568 @@
+const db = require("../config/db");
+const path = require("path");
+const ejs = require("ejs");
+const pdf = require("html-pdf-node");
+
+// Auto-close tasks that have reached their deadline
+exports.autoCloseExpiredTasks = async () => {
+  try {
+    const [closedTasks] = await db.query(
+      `UPDATE tasks 
+       SET status = 'closed'
+       WHERE status = 'open' AND deadline IS NOT NULL AND deadline < CURRENT_DATE
+       RETURNING task_id, title, deadline`,
+    );
+
+    if (closedTasks.length > 0) {
+      console.log(
+        `\n[AUTO-CLOSURE] ${closedTasks.length} task(s) auto-closed:`,
+      );
+      closedTasks.forEach((task) => {
+        console.log(
+          `  - Task #${task.task_id}: "${task.title}" (deadline: ${task.deadline})`,
+        );
+      });
+    }
+    return closedTasks.length;
+  } catch (err) {
+    console.error(
+      "[AUTO-CLOSURE ERROR] Failed to auto-close expired tasks:",
+      err.message,
+    );
+    return 0;
+  }
+};
+
+const normalizeSkill = (skill) => {
+  if (!skill || typeof skill !== "string") return "";
+  const normalized = skill.toLowerCase().trim();
+  const mapping = {
+    "node.js": "javascript",
+    nodejs: "javascript",
+    node: "javascript",
+    js: "javascript",
+    ts: "typescript",
+    csharp: "c#",
+    cpp: "c++",
+    "objective-c": "objective-c",
+  };
+  return mapping[normalized] || normalized;
+};
+
+exports.getDashboard = async (req, res) => {
+  const user_id = req.session.user?.user_id;
+  try {
+    // Business profile
+    const [pRows] = await db.query(
+      "SELECT * FROM business WHERE user_id = $1",
+      [user_id],
+    );
+
+    if (!pRows.length) {
+      console.log("No business profile found for user:", user_id);
+      // Clear session and redirect to login with a message
+      req.session.destroy();
+      return res.redirect("/login?error=noprofile");
+    }
+
+    const profile = pRows[0];
+
+    // Tasks posted by this business
+    const [tasks] = await db.query(
+      `SELECT t.*, COALESCE(accepted_counts.total_accepted, 0) AS accepted_count
+   FROM tasks t
+   LEFT JOIN (
+       SELECT task_id, COUNT(*) AS total_accepted
+       FROM applications
+       WHERE status = 'accepted'
+       GROUP BY task_id
+   ) accepted_counts ON t.task_id = accepted_counts.task_id
+   WHERE t.business_id = $1
+   ORDER BY t.posted_at DESC`,
+      [profile.profile_id],
+    );
+
+    // Calculate total accepted across all tasks
+    const totalApplicants = tasks.reduce(
+      (sum, t) => sum + Number(t.accepted_count),
+      0,
+    );
+    // Top applicants
+    const [topStudents] = await db.query(
+      `SELECT sp.first_name, sp.last_name, sp.institution, sp.ai_skill_score,
+              sp.github_username, a.status, a.application_id, t.title AS task_title
+       FROM applications a
+       JOIN student sp ON a.student_id = sp.profile_id
+       JOIN tasks t ON a.task_id = t.task_id
+       WHERE t.business_id = $1 AND a.status = 'accepted'
+       ORDER BY sp.ai_skill_score DESC LIMIT 10`,
+      [profile.profile_id],
+    );
+
+    // Submissions
+    const [submissions] = await db.query(
+      `SELECT s.submission_id, s.submission_url, s.notes, s.feedback, s.endorsement_rating,
+              s.endorsement_status, s.endorsed_at, s.submitted_at,
+              sp.first_name, sp.last_name, sp.institution,
+              t.title AS task_title
+       FROM submissions s
+       JOIN applications a ON s.application_id = a.application_id
+       JOIN student sp ON a.student_id = sp.profile_id
+       JOIN tasks t ON a.task_id = t.task_id
+       WHERE t.business_id = $1
+       ORDER BY s.submitted_at DESC`,
+      [profile.profile_id],
+    );
+
+    res.render("business_dashboard", {
+      user: req.session.user,
+      profile,
+      tasks,
+      topStudents,
+      submissions,
+      totalApplicants,
+    });
+  } catch (err) {
+    console.error(err);
+    res.send("Error loading dashboard.");
+  }
+};
+
+// Post a new task
+exports.getPostTask = (req, res) =>
+  res.render("post_task", { user: req.session.user, error: null });
+
+exports.postPostTask = async (req, res) => {
+  const {
+    title,
+    description,
+    required_skill,
+    min_skill_score,
+    task_type,
+    max_applicants,
+    deadline,
+  } = req.body;
+  const user_id = req.session.user.user_id;
+
+  const requiredSkills = required_skill
+    ? required_skill
+        .split(",")
+        .map((skill) => normalizeSkill(skill))
+        .filter(Boolean)
+    : [];
+
+  if (!requiredSkills.length) {
+    return res.render("post_task", {
+      user: req.session.user,
+      error:
+        "Please enter at least one programming language as the required skill.",
+    });
+  }
+
+  try {
+    const [pRows] = await db.query(
+      "SELECT profile_id FROM business WHERE user_id = $1",
+      [user_id],
+    );
+    await db.query(
+      `INSERT INTO tasks (business_id, title, description, required_skill, min_skill_score, task_type, max_applicants, deadline)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        pRows[0].profile_id,
+        title,
+        description,
+        required_skill,
+        min_skill_score || 0,
+        task_type,
+        max_applicants || null,
+        deadline || null,
+      ],
+    );
+    res.redirect("/business/dashboard");
+  } catch (err) {
+    console.error(err);
+    res.render("post_task", {
+      user: req.session.user,
+      error: "Could not post task. Try again.",
+    });
+  }
+};
+
+// View applicants for a task
+exports.getApplicants = async (req, res) => {
+  const { task_id } = req.params;
+  try {
+    const [tRows] = await db.query("SELECT * FROM tasks WHERE task_id = $1", [
+      task_id,
+    ]);
+    const [applicants] = await db.query(
+      `SELECT a.application_id, a.cover_note, a.status, a.applied_at,
+              sp.first_name, sp.last_name, sp.institution, sp.ai_skill_score, sp.github_username
+       FROM applications a
+       JOIN student sp ON a.student_id = sp.profile_id
+       WHERE a.task_id = $1 AND a.status = 'accepted'
+       ORDER BY sp.ai_skill_score DESC`,
+      [task_id],
+    );
+    res.render("applicants", {
+      user: req.session.user,
+      task: tRows[0],
+      applicants,
+    });
+  } catch (err) {
+    console.error(err);
+    res.send("Could not load applicants.");
+  }
+};
+
+// Delete a task
+exports.deleteTask = async (req, res) => {
+  const { task_id } = req.params;
+  try {
+    const [countRows] = await db.query(
+      "SELECT COUNT(*) AS total_accepted FROM applications WHERE task_id = $1 AND status = 'accepted'",
+      [task_id],
+    );
+    const totalAccepted = Number(countRows[0]?.total_accepted || 0);
+
+    if (totalAccepted > 0) {
+      return res
+        .status(400)
+        .send(
+          "Cannot delete task because students have already been accepted. Please close the task instead.",
+        );
+    }
+
+    await db.query("DELETE FROM tasks WHERE task_id = $1", [task_id]);
+    res.redirect("/business/dashboard");
+  } catch (err) {
+    console.error(err);
+    res.send("Could not delete task.");
+  }
+};
+
+exports.getReviewSubmission = async (req, res) => {
+  const { submission_id } = req.params;
+  const user_id = req.session.user?.user_id;
+  try {
+    const [rows] = await db.query(
+      `SELECT s.submission_id, s.submission_url, s.notes, s.feedback,
+              s.endorsement_rating, s.endorsement_status, s.endorsed_at,
+              a.application_id, a.student_id,
+              t.title AS task_title, bp.company_name,
+              sp.first_name, sp.last_name, sp.institution
+       FROM submissions s
+       JOIN applications a ON s.application_id = a.application_id
+       JOIN tasks t ON a.task_id = t.task_id
+       JOIN business bp ON t.business_id = bp.profile_id
+       JOIN student sp ON a.student_id = sp.profile_id
+       WHERE s.submission_id = $1 AND t.business_id = (
+         SELECT profile_id FROM business WHERE user_id = $2
+       )`,
+      [submission_id, user_id],
+    );
+    if (!rows.length) {
+      return res.status(404).send("Submission not found.");
+    }
+    res.render("review_submission", {
+      user: req.session.user,
+      submission: rows[0],
+    });
+  } catch (err) {
+    console.error(err);
+    res.send("Error loading submission review page.");
+  }
+};
+
+// Save feedback and endorsement on a submission
+exports.postFeedback = async (req, res) => {
+  const { submission_id, feedback, endorsement_rating, endorsement_status } =
+    req.body;
+  const ratingValue = endorsement_rating ? Number(endorsement_rating) : null;
+  const statusValue = endorsement_status || "pending";
+  try {
+    await db.query(
+      `UPDATE submissions s
+       SET feedback = $1,
+           endorsement_rating = $2,
+           endorsement_status = $3,
+           endorsed_at = NOW()
+       FROM applications a
+       JOIN tasks t ON a.task_id = t.task_id
+       JOIN business bp ON t.business_id = bp.profile_id
+       WHERE s.application_id = a.application_id
+         AND s.submission_id = $4
+         AND bp.user_id = $5`,
+      [
+        feedback || null,
+        ratingValue,
+        statusValue,
+        submission_id,
+        req.session.user.user_id,
+      ],
+    );
+    res.redirect("/business/dashboard");
+  } catch (err) {
+    console.error(err);
+    res.send("Error saving feedback.");
+  }
+};
+
+// Update business profile
+exports.updateProfile = async (req, res) => {
+  const { business_id, company_name, industry, company_email, website_url } =
+    req.body;
+
+  // If a file was uploaded, build the URL; otherwise keep the existing one
+  const profilePicUrl = req.file ? `/uploads/${req.file.filename}` : null;
+  try {
+    await db.query(
+      `UPDATE business 
+       SET company_name = $1, industry = $2, company_email = $3,logo_url = COALESCE($4, logo_url), website_url = COALESCE($5, website_url)
+       WHERE profile_id = $6`,
+      [
+        company_name,
+        industry,
+        company_email,
+        profilePicUrl,
+        website_url,
+        business_id,
+      ],
+    );
+
+    // Update session info so changes reflect immediately
+    req.session.user.company_name = company_name;
+    req.session.user.company_email = company_email;
+    console.log("Body:", req.body);
+    console.log("File:", req.file);
+
+    res.redirect("/business/dashboard");
+  } catch (err) {
+    console.error(err);
+    res.send("Could not update profile.");
+  }
+};
+
+// Delete business account
+exports.deleteProfile = async (req, res) => {
+  const { business_id } = req.body;
+  try {
+    // First, get the user_id linked to this business profile
+    const [rows] = await db.query(
+      "SELECT user_id FROM business WHERE profile_id = $1",
+      [business_id],
+    );
+    if (!rows.length) {
+      return res.redirect("/login?error=noprofile");
+    }
+    const user_id = rows[0].user_id;
+
+    // Delete related tasks
+    await db.query("DELETE FROM tasks WHERE business_id = $1", [business_id]);
+
+    // Delete the business profile itself
+    await db.query("DELETE FROM business WHERE profile_id = $1", [business_id]);
+
+    // Delete the user account itself
+    await db.query("DELETE FROM users WHERE user_id = $1", [user_id]);
+
+    // Clear session so user is logged out
+    req.session.destroy();
+
+    res.redirect("/login?deleted=business");
+  } catch (err) {
+    console.error(err);
+    res.send("Error deleting business profile or account.");
+  }
+};
+
+// Render edit profile page
+exports.getEditProfile = async (req, res) => {
+  const user_id = req.session.user.user_id;
+  try {
+    const [pRows] = await db.query(
+      "SELECT * FROM business WHERE user_id = $1",
+      [user_id],
+    );
+    const profile = pRows[0];
+    res.render("edit_business_profile", {
+      user: req.session.user,
+      profile,
+    });
+  } catch (err) {
+    console.error(err);
+    res.send("Error loading profile edit page.");
+  }
+};
+
+// controllers/businessController.js
+exports.getSummaryReport = async (req, res) => {
+  const user_id = req.session.user.user_id;
+  try {
+    // Business profile
+    const [profileRows] = await db.query(
+      "SELECT profile_id, company_name, industry, company_email FROM business WHERE user_id = $1",
+      [user_id],
+    );
+    const profile = profileRows[0];
+
+    // Handle date filters (default: current month)
+    let { startDate, endDate } = req.query;
+    if (!startDate || !endDate) {
+      const today = new Date();
+      const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+      const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+      startDate = startDate || firstDay.toISOString().split("T")[0];
+      endDate = endDate || lastDay.toISOString().split("T")[0];
+    }
+
+    // Tasks posted
+    const [tasksCount] = await db.query(
+      "SELECT COUNT(*) AS total_tasks FROM tasks WHERE business_id = $1 AND posted_at BETWEEN $2 AND $3",
+      [profile.profile_id, startDate, endDate],
+    );
+
+    // Applicants
+    const [applicantsCount] = await db.query(
+      `SELECT
+         COUNT(*) AS total_applicants,
+         COUNT(*) FILTER (WHERE a.status = 'accepted') AS accepted_applicants,
+         COUNT(*) FILTER (WHERE a.status = 'rejected') AS rejected_applicants
+       FROM applications a
+       JOIN tasks t ON a.task_id = t.task_id
+       WHERE t.business_id = $1 AND a.applied_at BETWEEN $2 AND $3`,
+      [profile.profile_id, startDate, endDate],
+    );
+
+    // Submissions
+    const [submissionsCount] = await db.query(
+      `SELECT COUNT(*) AS total_submissions
+       FROM submissions s
+       JOIN applications a ON s.application_id = a.application_id
+       JOIN tasks t ON a.task_id = t.task_id
+       WHERE t.business_id = $1 AND s.submitted_at BETWEEN $2 AND $3`,
+      [profile.profile_id, startDate, endDate],
+    );
+
+    // Recent tasks
+    const [recentTasks] = await db.query(
+      `SELECT task_id, title, posted_at
+       FROM tasks
+       WHERE business_id = $1 AND posted_at BETWEEN $2 AND $3
+       ORDER BY posted_at DESC
+       LIMIT 5`,
+      [profile.profile_id, startDate, endDate],
+    );
+
+    res.render("business_summary", {
+      user: req.session.user,
+      profile,
+      tasksCount: tasksCount[0],
+      applicantsCount: applicantsCount[0],
+      submissionsCount: submissionsCount[0],
+      recentTasks,
+      startDate,
+      endDate,
+      generatedAt: new Date().toLocaleString(),
+    });
+  } catch (err) {
+    console.error(err);
+    res.send("Could not generate business summary report.");
+  }
+};
+exports.exportSummaryPDF = async (req, res) => {
+  const user_id = req.session.user.user_id;
+  try {
+    // Business profile
+    const [profileRows] = await db.query(
+      "SELECT profile_id, company_name, industry, company_email FROM business WHERE user_id = $1",
+      [user_id],
+    );
+    const profile = profileRows[0];
+
+    // Handle date filters (default: current month)
+    let { startDate, endDate } = req.query;
+    if (!startDate || !endDate) {
+      const today = new Date();
+      const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+      const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+      startDate = startDate || firstDay.toISOString().split("T")[0];
+      endDate = endDate || lastDay.toISOString().split("T")[0];
+    }
+
+    // Tasks count
+    const [tasksCount] = await db.query(
+      "SELECT COUNT(*) AS total_tasks FROM tasks WHERE business_id = $1 AND posted_at BETWEEN $2 AND $3",
+      [profile.profile_id, startDate, endDate],
+    );
+
+    // Applicants count
+    const [applicantsCount] = await db.query(
+      `SELECT
+         COUNT(*) AS total_applicants,
+         COUNT(*) FILTER (WHERE a.status = 'accepted') AS accepted_applicants,
+         COUNT(*) FILTER (WHERE a.status = 'rejected') AS rejected_applicants
+       FROM applications a
+       JOIN tasks t ON a.task_id = t.task_id
+       WHERE t.business_id = $1 AND a.applied_at BETWEEN $2 AND $3`,
+      [profile.profile_id, startDate, endDate],
+    );
+
+    // Submissions count
+    const [submissionsCount] = await db.query(
+      `SELECT COUNT(*) AS total_submissions
+       FROM submissions s
+       JOIN applications a ON s.application_id = a.application_id
+       JOIN tasks t ON a.task_id = t.task_id
+       WHERE t.business_id = $1 AND s.submitted_at BETWEEN $2 AND $3`,
+      [profile.profile_id, startDate, endDate],
+    );
+
+    // Recent tasks
+    const [recentTasks] = await db.query(
+      `SELECT task_id, title, posted_at
+       FROM tasks
+       WHERE business_id = $1 AND posted_at BETWEEN $2 AND $3
+       ORDER BY posted_at DESC
+       LIMIT 5`,
+      [profile.profile_id, startDate, endDate],
+    );
+
+    // Render template
+    const templatePath = path.join(__dirname, "../views/business_summary.ejs");
+    const htmlContent = await ejs.renderFile(templatePath, {
+      user: req.session.user,
+      profile,
+      tasksCount: tasksCount[0],
+      applicantsCount: applicantsCount[0],
+      submissionsCount: submissionsCount[0],
+      recentTasks,
+      startDate,
+      endDate,
+      generatedAt: new Date().toLocaleString(),
+      isPdf: true,
+    });
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const absoluteHtmlContent = String(htmlContent).replace(
+      /(href|src)=["']\//g,
+      `$1="${baseUrl}/`,
+    );
+
+    // Generate PDF
+    const file = { content: absoluteHtmlContent };
+    const pdfBuffer = await pdf.generatePdf(file, { format: "A4" });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      "attachment; filename=Business_Summary_Report.pdf",
+    );
+    res.send(pdfBuffer);
+  } catch (err) {
+    console.error("PDF generation error:", err);
+    res.status(500).send("Could not generate business summary PDF.");
+  }
+};

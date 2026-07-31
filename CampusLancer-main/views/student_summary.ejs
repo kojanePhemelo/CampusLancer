@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Student Summary Report</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f0f4f8; /* light blue background */
+        color: #333;
+        margin: 0;
+        padding: 20px;
+      }
+      h2 {
+        color: #1e3a8a; /* deep blue */
+        text-align: center;
+        margin: 30px 0;
+      }
+      .actions {
+        display: flex;
+        justify-content: center;
+        gap: 1rem;
+        margin-bottom: 1rem;
+      }
+      .btn {
+        padding: 0.4rem 0.8rem;
+        border-radius: 4px;
+        text-decoration: none;
+        font-size: 0.9rem;
+      }
+      .btn-primary {
+        background-color: #2563eb;
+        color: #fff;
+      }
+      .btn-outline {
+        border: 1px solid #2563eb;
+        color: #2563eb;
+      }
+      .filter-form {
+        max-width: 700px;
+        margin: 0 auto 20px auto;
+        display: flex;
+        justify-content: center;
+        gap: 15px;
+        background: #fff;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      }
+      .filter-form label {
+        font-weight: 600;
+        color: #1e40af;
+      }
+      .filter-form input {
+        padding: 5px;
+        border: 1px solid #cbd5e1;
+        border-radius: 4px;
+      }
+      .report-container {
+        max-width: 700px;
+        margin: 20px auto;
+        background-color: #ffffff;
+        border-radius: 10px;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        padding: 25px;
+      }
+      .report-item {
+        display: flex;
+        justify-content: space-between;
+        padding: 12px 0;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .report-item:last-child {
+        border-bottom: none;
+      }
+      .label {
+        font-weight: bold;
+        color: #1e40af;
+      }
+      .value {
+        font-weight: bold;
+        color: #2563eb;
+      }
+      .status-list, .recent-apps {
+        margin-top: 20px;
+      }
+      .status-list h3, .recent-apps h3 {
+        color: #1e3a8a;
+        margin-bottom: 10px;
+      }
+      .status-item {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 0;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .recent-apps table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .recent-apps th, .recent-apps td {
+        border: 1px solid #e5e7eb;
+        padding: 8px;
+        text-align: left;
+      }
+      .recent-apps th {
+        background-color: #f9fafb;
+        color: #1e40af;
+      }
+      .footer {
+        margin-top: 20px;
+        text-align: center;
+        font-size: 0.85rem;
+        color: #666;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Student-specific navigation -->
+    <%- include('partials/studentNav') %>
+
+    <h2>Student Summary Report</h2>
+
+    <!-- Action buttons -->
+    <div class="actions">
+      <a href="/student/dashboard" class="btn btn-outline">← Back to Dashboard</a>
+      <a href="/student/reports/export-pdf?startDate=<%= startDate %>&endDate=<%= endDate %>" class="btn btn-primary">
+        ⬇ Download PDF Report
+      </a>
+    </div>
+
+    <!-- Filter Form -->
+    <form method="get" action="/student/reports/summary" class="filter-form">
+      <label for="startDate">Start Date:</label>
+      <input type="date" id="startDate" name="startDate" value="<%= startDate || '' %>">
+
+      <label for="endDate">End Date:</label>
+      <input type="date" id="endDate" name="endDate" value="<%= endDate || '' %>">
+
+      <button type="submit" class="btn btn-primary">Apply Filter</button>
+    </form>
+
+    <!-- Profile and totals -->
+    <div class="report-container">
+      <div class="report-item">
+        <span class="label">Name:</span>
+        <span class="value"><%= profile.first_name %> <%= profile.last_name %></span>
+      </div>
+      <div class="report-item">
+        <span class="label">Institution:</span>
+        <span class="value"><%= profile.institution %></span>
+      </div>
+      <div class="report-item">
+        <span class="label">Course:</span>
+        <span class="value"><%= profile.course %></span>
+      </div>
+      <div class="report-item">
+        <span class="label">Total Applications:</span>
+        <span class="value"><%= applicationsCount.total_applications %></span>
+      </div>
+      <div class="report-item">
+        <span class="label">Total Submissions:</span>
+        <span class="value"><%= submissionsCount.total_submissions %></span>
+      </div>
+    </div>
+
+    <!-- Applications by status -->
+    <div class="status-list report-container">
+      <h3>Applications by Status</h3>
+      <% statusBreakdown.forEach(function(status) { %>
+        <div class="status-item">
+          <span class="label"><%= status.status %>:</span>
+          <span class="value"><%= status.count %></span>
+        </div>
+      <% }) %>
+    </div>
+
+    <!-- Recent applications -->
+    <div class="recent-apps report-container">
+      <h3>Recent Applications</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Task Title</th>
+            <th>Company</th>
+            <th>Status</th>
+            <th>Applied At</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% recentApplications.forEach(function(app) { %>
+            <tr>
+              <td><%= app.title %></td>
+              <td><%= app.company_name %></td>
+              <td><%= app.status %></td>
+              <td><%= app.applied_at.toDateString() %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="footer">
+      Report generated on <%= generatedAt %> (Date range: <%= startDate %> to <%= endDate %>)
+    </div>
+  </body>
+</html>
